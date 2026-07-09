@@ -5,6 +5,11 @@ Tracks top MLB traders on Polymarket, computes sentiment signals per market, det
 ## Quick Start — Docker
 
 ```bash
+git clone https://github.com/yxf9tv/mob-sentiment-bot.git
+cd mob-sentiment-bot
+```
+
+```bash
 docker build -t sentiment-bot .
 docker run -d \
   -e intelligence_api_key=<key> \
