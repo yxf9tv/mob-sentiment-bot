@@ -9,7 +9,6 @@ when edge thresholds are crossed.
 import os
 import sys
 import time
-import subprocess
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -20,29 +19,18 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 INTELLIGENCE_API_KEY = os.getenv("intelligence_api_key")
 
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "300"))
-BASE_DIR = Path(__file__).parent
-SCRIPTS_DIR = BASE_DIR / "scripts"
-DATA_DIR = BASE_DIR / "data"
+SCRIPTS_DIR = Path(__file__).parent / "scripts"
+DATA_DIR = Path(__file__).parent / "data"
 
 
-def bootstrap():
-    """Ensure runtime data exists before starting the poll loop."""
+def ensure_traders():
     traders_file = DATA_DIR / "top_mlb_traders.json"
     if traders_file.exists():
         return
-
-    print("No trader data found. Running trader discovery pipeline...")
-    print("This may take several minutes on first run.")
-    result = subprocess.run(
-        [sys.executable, str(SCRIPTS_DIR / "find_top_mlb_traders.py")],
-        capture_output=True, text=True, timeout=600,
-        env={**os.environ, "PYTHONUNBUFFERED": "1"},
-    )
-    print(result.stdout[-3000:] if result.stdout else "")
-    if result.returncode != 0:
-        print(f"Trader discovery failed (exit {result.returncode}):")
-        print(result.stderr[-2000:] if result.stderr else "")
-        sys.exit(1)
+    print("No trader data found. Running discovery pipeline (may take a few minutes)...")
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    from find_top_mlb_traders import main as discover
+    discover()
     print("Trader discovery complete.")
 
 
@@ -52,7 +40,7 @@ def main():
         sys.exit(1)
 
     sys.path.insert(0, str(SCRIPTS_DIR))
-    bootstrap()
+    ensure_traders()
 
     print(f"Sentiment bot starting — polling every {POLL_INTERVAL}s")
     while True:
