@@ -825,13 +825,6 @@ def main():
         from recommend import main as gen_recommendations
         gen_recommendations()
     except Exception as e:
-    # 7.76. Send Telegram alerts for new triggers
-    try:
-        from telegram import notify_new_triggers
-        notify_new_triggers(new_triggers)
-    except Exception as e:
-        print(f"  [telegram error: {e}]")
-
         print(f"  [recommend error: {e}]")
 
 
