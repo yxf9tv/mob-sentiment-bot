@@ -1,0 +1,13 @@
+.env
+.env.local
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+
+# Runtime-generated data (rebuilt by scripts)
+data/
+!data/.gitkeep
+
+# Docs
+prediction_market_api_context.md
