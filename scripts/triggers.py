@@ -1,9 +1,9 @@
 """
-Track when markets first cross edge volume thresholds during their lifetime.
+Track when markets first cross the composite score threshold.
 
-Each poll cycle, checks live markets against known thresholds and logs the
-first moment a qualifying market crosses. Accumulates data for later
-backtesting: "if we fired at this moment, what accuracy would we get?"
+Each poll cycle, checks live markets against the composite threshold (0.40)
+and logs the first moment a qualifying market crosses. Replaces the old
+volume-only threshold system.
 
 Output:
   data/trigger_state.json   — per-market crossing state (mutable, overwritten)
@@ -18,13 +18,8 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 STATE_PATH = DATA_DIR / "trigger_state.json"
 EVENTS_PATH = DATA_DIR / "trigger_events.jsonl"
 
-# Threshold definitions: (label, market_type, min_volume, description)
-THRESHOLDS = [
-    ("ml_high_vol",   "moneyline", 1071.0, "ML + vol >= $1,071 -> 74.4%"),
-    ("spread_mid_vol", "spread",   107.0,  "Spread + vol >= $107 -> 73.1%"),
-    ("ml_mid_vol",    "moneyline", 107.0,  "ML + vol >= $107 -> 64.0%"),
-    ("total_cross",   "total",     0.0,    "Total market (fade) -> 57.3%"),
-]
+# Composite threshold: 62.0% accuracy, 46.2% coverage (backtested)
+COMPOSITE_THRESHOLD = 0.40
 
 
 def load_state():
@@ -47,7 +42,7 @@ def log_event(event):
 
 
 def process_live_data(active_games, polled_at):
-    """Check all active markets against thresholds and log first-time crosses."""
+    """Check all active markets against composite threshold and log first-time crosses."""
     state = load_state()
     now_iso = polled_at if isinstance(polled_at, str) else polled_at.isoformat()
     new_events = []
@@ -60,10 +55,12 @@ def process_live_data(active_games, polled_at):
             cid = m.get("condition_id", "")
             if not cid:
                 continue
-            market_type = m.get("market_type", "")
+
+            composite_score = m.get("composite_score", 0) or 0
+            confidence = m.get("confidence", "LOW")
             volume = m.get("total_weighted_volume", 0) or 0
             top_outcome = m.get("top_outcome", "")
-            conviction = m.get("conviction", 0)
+            market_type = m.get("market_type", "")
 
             # Ensure state entry
             entry = state.get(cid)
@@ -74,46 +71,38 @@ def process_live_data(active_games, polled_at):
                     "market_type": market_type,
                     "game_date": m.get("game_date", ""),
                     "first_seen": now_iso,
-                    "thresholds_crossed": {},
-                    "last_volume": 0,
+                    "crossed": False,
+                    "last_composite": 0,
                     "last_outcome": top_outcome,
                 }
                 state[cid] = entry
 
-            for label, mt, min_vol, desc in THRESHOLDS:
-                if market_type != mt:
-                    continue
-                already = entry["thresholds_crossed"].get(label, {}).get("crossed", False)
-                current = volume >= min_vol
-                if current and not already:
-                    event = {
-                        "event_type": "threshold_crossed",
-                        "condition_id": cid,
-                        "slug": m.get("slug", ""),
-                        "market_type": market_type,
-                        "threshold": label,
-                        "description": desc,
-                        "crossed_at": now_iso,
-                        "volume": round(volume, 2),
-                        "min_volume": min_vol,
-                        "top_outcome": top_outcome,
-                        "conviction": conviction,
-                        "unique_traders": m.get("unique_traders", 0),
-                        "depth_imbalance": m.get("orderbook", {}).get("depth_imbalance", None),
-                        "total_trade_events": m.get("total_trade_events", 0),
-                        "game_date": m.get("game_date", ""),
-                        "min_volume": min_vol,
-                    }
-                    log_event(event)
-                    new_events.append(event)
-                    entry["thresholds_crossed"][label] = {
-                        "crossed": True,
-                        "crossed_at": now_iso,
-                        "volume": round(volume, 2),
-                    }
-                    updated_any = True
+            already = entry.get("crossed", False)
+            current = composite_score >= COMPOSITE_THRESHOLD
+            if current and not already:
+                event = {
+                    "event_type": "composite_crossed",
+                    "condition_id": cid,
+                    "slug": m.get("slug", ""),
+                    "market_type": market_type,
+                    "composite_score": round(composite_score, 4),
+                    "confidence": confidence,
+                    "threshold": COMPOSITE_THRESHOLD,
+                    "crossed_at": now_iso,
+                    "volume": round(volume, 2),
+                    "top_outcome": top_outcome,
+                    "unique_traders": m.get("unique_traders", 0),
+                    "depth_imbalance": m.get("orderbook", {}).get("depth_imbalance", None),
+                    "total_trade_events": m.get("total_trade_events", 0),
+                    "game_date": m.get("game_date", ""),
+                }
+                log_event(event)
+                new_events.append(event)
+                entry["crossed"] = True
+                entry["crossed_at"] = now_iso
+                updated_any = True
 
-            entry["last_volume"] = volume
+            entry["last_composite"] = round(composite_score, 4)
             entry["last_outcome"] = top_outcome
             entry["last_poll"] = now_iso
 
@@ -135,20 +124,13 @@ def summarize_events():
             if line:
                 events.append(json.loads(line))
 
-    by_threshold = defaultdict(list)
-    for e in events:
-        by_threshold[e["threshold"]].append(e)
-
     print(f"\nTrigger events: {len(events)} total")
-    for label, items in sorted(by_threshold.items()):
-        print(f"  {label}: {len(items)} events")
-        for e in items[:5]:
-            ts = e["crossed_at"][:19]
-            vol = e["volume"]
-            slug = e["slug"]
-            print(f"    {ts}  {slug}  vol=${vol:,.0f}")
-        if len(items) > 5:
-            print(f"    ... and {len(items)-5} more")
+    for e in events[-10:]:
+        ts = e.get("crossed_at", "")[:19]
+        score = e.get("composite_score", 0)
+        conf = e.get("confidence", "?")
+        slug = e.get("slug", "?")
+        print(f"  {ts}  {slug}  score={score:.3f}  {conf}")
 
 
 if __name__ == "__main__":

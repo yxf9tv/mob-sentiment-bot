@@ -70,12 +70,10 @@ def format_alert(event):
     top_outcome = event.get("top_outcome", "?")
     volume = event.get("volume", 0)
     traders = event.get("unique_traders", 0)
-    conviction = event.get("conviction", 0)
     depth_imb = event.get("depth_imbalance")
     game_date = event.get("game_date", "")
-    desc = event.get("description", "")
-
-    confidence = "HIGH" if "74.4" in desc or "73.1" in desc else "MEDIUM"
+    composite_score = event.get("composite_score", 0)
+    confidence = event.get("confidence", "MEDIUM")
 
     lines = [
         f"⚾ *{label}*",
@@ -84,9 +82,9 @@ def format_alert(event):
     if game_date:
         lines.append(f"`{game_date}`")
     lines.append("")
+    lines.append(f"Score:\t*{composite_score:.2f}* ({confidence})")
     lines.append(f"Volume:\t${volume:,.0f}")
     lines.append(f"Traders:\t{traders}")
-    lines.append(f"Conviction:\t{conviction:.2f}")
 
     if depth_imb is not None:
         imb = round(depth_imb, 2)
@@ -97,10 +95,6 @@ def format_alert(event):
         else:
             tag = " `neutral`"
         lines.append(f"Liq Depth:\t{imb:.2f}{tag}")
-
-    lines.append("")
-    lines.append(f"Edge:\t{desc}")
-    lines.append(f"Confidence:\t*{confidence}*")
 
     return "\n".join(lines)
 

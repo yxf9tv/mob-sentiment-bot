@@ -18,6 +18,7 @@ import requests
 NY_TZ = ZoneInfo("America/New_York")
 
 from tracker import update as update_tracker
+from composite import compute_composite, classify_confidence
 
 def today_ny():
     """Get today's date string in America/New_York timezone."""
@@ -598,6 +599,9 @@ def build_live_view(open_markets, sentiments_by_cid, today, orderbook_data=None)
             })
         if sentiment and orderbook_data and cid in orderbook_data:
             entry["orderbook"] = orderbook_data[cid]
+        if sentiment:
+            entry["composite_score"] = compute_composite(entry)
+            entry["confidence"] = classify_confidence(entry["composite_score"])
         game_markets[parsed["event_slug"]].append(entry)
 
     # Build games view
@@ -767,14 +771,14 @@ def main():
     except Exception as e:
         print(f"  [telegram error: {e}]")
 
-    # 8. Top consensus from trader data
+    # 8. Top consensus from trader data (ranked by composite score)
     live_consensus = sorted(
-        [m for m in active_with_data if m.get("unique_traders", 0) >= 2 and m.get("conviction", 0) >= 0.2],
-        key=lambda m: -(m["conviction"] * (m["unique_traders"] ** 0.5) * max(m["total_trade_events"], 1) ** 0.3),
+        [m for m in active_with_data if m.get("composite_score", 0) >= 0.40],
+        key=lambda m: -(m.get("composite_score", 0)),
     )
     live_consensus_all = sorted(
-        [m for m in active_with_data if m.get("unique_traders", 0) >= 1],
-        key=lambda m: -(m["conviction"] * (m["unique_traders"] ** 0.5) * max(m["total_trade_events"], 1) ** 0.3),
+        [m for m in active_with_data if m.get("composite_score", 0) > 0],
+        key=lambda m: -(m.get("composite_score", 0)),
     )
 
     # 9. Write output
