@@ -3,12 +3,14 @@
 Entrypoint for Docker deployment.
 
 Runs the live polling loop continuously, sending Telegram alerts
-when edge thresholds are crossed.
+when edge thresholds are crossed. Also starts the interactive
+Telegram bot in a background thread for commands/buttons.
 """
 
 import os
 import sys
 import time
+import threading
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -34,6 +36,23 @@ def ensure_traders():
     print("Trader discovery complete.")
 
 
+def start_telegram_bot():
+    """Start the interactive Telegram bot in a background thread."""
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    from telegram_bot import run_bot, STOP_EVENT
+
+    def _run():
+        try:
+            run_bot()
+        except Exception as e:
+            print(f"[telegram bot] error: {e}")
+
+    t = threading.Thread(target=_run, daemon=True, name="telegram-bot")
+    t.start()
+    print("Interactive Telegram bot started (background thread)")
+    return t
+
+
 def main():
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID or not INTELLIGENCE_API_KEY:
         print("Error: Missing credentials! Check TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, and intelligence_api_key.")
@@ -41,6 +60,9 @@ def main():
 
     sys.path.insert(0, str(SCRIPTS_DIR))
     ensure_traders()
+
+    # Start interactive Telegram bot (listens for /start, buttons, etc.)
+    start_telegram_bot()
 
     print(f"Sentiment bot starting — polling every {POLL_INTERVAL}s")
     while True:
