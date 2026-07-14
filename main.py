@@ -59,10 +59,14 @@ def main():
         sys.exit(1)
 
     sys.path.insert(0, str(SCRIPTS_DIR))
-    ensure_traders()
 
-    # Start interactive Telegram bot (listens for /start, buttons, etc.)
+    # Start interactive Telegram bot FIRST so it's responsive immediately,
+    # before the (potentially slow) trader discovery pipeline runs.
     start_telegram_bot()
+
+    # Discover traders if missing. Persisted via the bot-data volume, so this
+    # normally only runs on the very first deploy.
+    ensure_traders()
 
     print(f"Sentiment bot starting — polling every {POLL_INTERVAL}s")
     while True:
