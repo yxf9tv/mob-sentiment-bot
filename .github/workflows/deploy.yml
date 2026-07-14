@@ -29,4 +29,4 @@ jobs:
           echo "${{ secrets.ENV_FILE_CONTENT }}" > .env
           chmod 600 .env
 
-          docker compose -f ~/apps/polymarket-suite/docker-compose.yml up -d --build ${{ github.event.repository.name }}
+          docker compose up -d --build
