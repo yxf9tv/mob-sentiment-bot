@@ -1,14 +1,17 @@
 """Composite score for MLB prediction markets.
 
-Combines volume, trader count, liquidity depth, and market type into a
-single 0-1 score representing overall signal quality. Weights are
-placeholders — run backtest_composite.py to optimize.
+Combines volume, trader count, liquidity depth, market type, and
+trader-specific signals (accuracy by market type, confidence spikes)
+into a single 0-1 score representing overall signal quality.
 """
 
 import math
+import json
+from pathlib import Path
+
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 # --- Backtested weights (optimal from 684 combinations) ---
-# 62.0% accuracy, 46.2% coverage, 23.9% ROI on 353 resolved markets
 W_VOLUME = 0.40
 W_TRADERS = 0.30
 W_LIQUIDITY = 0.10
@@ -31,8 +34,17 @@ EDGE_SCORES = {
 }
 
 # --- Confidence thresholds (backtested) ---
-CONFIDENCE_HIGH = 0.50   # 63.0% accuracy, 33.7% coverage
-CONFIDENCE_MEDIUM = 0.40 # 62.0% accuracy, 46.2% coverage
+CONFIDENCE_HIGH = 0.50
+CONFIDENCE_MEDIUM = 0.40
+
+# --- Trader accuracy thresholds ---
+MIN_TRADES_FOR_ACCURACY = 5
+HIGH_ACCURACY_THRESHOLD = 0.60
+LOW_ACCURACY_THRESHOLD = 0.45
+
+# --- Confidence spike thresholds ---
+SPIKE_MULTIPLIER = 1.5
+HIGH_SPIKE_MULTIPLIER = 2.0
 
 
 def compute_volume_score(volume):
@@ -115,3 +127,97 @@ def classify_confidence(score):
     if score >= CONFIDENCE_MEDIUM:
         return "MEDIUM"
     return "LOW"
+
+
+# --- Trader accuracy and confidence spike functions ---
+
+_trader_accuracy_cache = None
+
+def load_trader_accuracy():
+    """Load trader accuracy database (cached in memory)."""
+    global _trader_accuracy_cache
+    if _trader_accuracy_cache is not None:
+        return _trader_accuracy_cache
+    path = DATA_DIR / "trader_accuracy.json"
+    if path.exists():
+        with open(path) as f:
+            _trader_accuracy_cache = json.load(f)
+    else:
+        _trader_accuracy_cache = {}
+    return _trader_accuracy_cache
+
+
+def get_trader_accuracy_modifier(wallet, market_type, trader_accuracy=None):
+    """Get accuracy-based weight modifier for a trader on a specific market type.
+
+    Returns:
+        float: 1.2 if high accuracy, 0.7 if low accuracy, 1.0 if unknown/insufficient data
+    """
+    if trader_accuracy is None:
+        trader_accuracy = load_trader_accuracy()
+
+    trader = trader_accuracy.get(wallet, {})
+    mt_stats = trader.get(market_type, {})
+
+    if not mt_stats.get("reliable", False):
+        return 1.0
+
+    accuracy = mt_stats.get("accuracy", 0)
+    if accuracy >= HIGH_ACCURACY_THRESHOLD:
+        return 1.2
+    elif accuracy <= LOW_ACCURACY_THRESHOLD:
+        return 0.7
+    return 1.0
+
+
+def get_confidence_spike_modifier(notional, avg_notional):
+    """Get confidence spike weight modifier based on bet size vs average.
+
+    Returns:
+        float: 2.0 for high spike, 1.5 for normal spike, 1.0 for normal
+    """
+    if avg_notional <= 0:
+        return 1.0
+
+    ratio = notional / avg_notional
+    if ratio >= HIGH_SPIKE_MULTIPLIER:
+        return 2.0
+    elif ratio >= SPIKE_MULTIPLIER:
+        return 1.5
+    return 1.0
+
+
+def compute_trader_weight(trader, market_type, trader_accuracy=None):
+    """Compute weight for a single trader incorporating accuracy and spike signals.
+
+    Args:
+        trader: dict with wallet, baseball_pnl_15d, win_rate, sharpe_ratio,
+                human_likeness_score, _avg_notional, _confidence_spike
+        market_type: string (moneyline, spread, total, etc.)
+        trader_accuracy: optional pre-loaded accuracy database
+
+    Returns:
+        float: weighted score for this trader
+    """
+    pnl = max(trader.get("baseball_pnl_15d") or 0, 0)
+    wr = trader.get("win_rate") or 0.5
+    sharpe = max(trader.get("sharpe_ratio") or 0, 0)
+    human = (trader.get("human_likeness_score") or 50) / 100.0
+
+    # Base weight (same formula as compute_sentiment.py)
+    max_pnl = 100000
+    pnl_w = min(pnl / max_pnl, 1.0)
+    wr_w = max(wr - 0.5, 0) * 2
+    sharpe_w = min(sharpe / 2.0, 1.0)
+    base_weight = 0.5 * pnl_w + 0.2 * wr_w + 0.15 * sharpe_w + 0.15 * human
+
+    # Apply accuracy modifier
+    wallet = trader.get("wallet", "")
+    accuracy_mod = get_trader_accuracy_modifier(wallet, market_type, trader_accuracy)
+
+    # Apply confidence spike modifier
+    avg_notional = trader.get("_avg_notional", 0)
+    notional = trader.get("_last_notional", 0)
+    spike_mod = get_confidence_spike_modifier(notional, avg_notional) if notional > 0 else 1.0
+
+    return base_weight * accuracy_mod * spike_mod

@@ -18,7 +18,7 @@ import requests
 NY_TZ = ZoneInfo("America/New_York")
 
 from tracker import update as update_tracker
-from composite import compute_composite, classify_confidence
+from composite import compute_composite, classify_confidence, load_trader_accuracy, get_trader_accuracy_modifier, get_confidence_spike_modifier
 
 def today_ny():
     """Get today's date string in America/New_York timezone."""
@@ -358,6 +358,9 @@ def fetch_trader_trades(traders, mlb_markets, api_key):
 
 def compute_sentiment(trader_list):
     """Replicate sentiment computation from compute_sentiment.py but only using fresh cache data."""
+    # Load trader accuracy database
+    trader_accuracy = load_trader_accuracy()
+
     # Build trader index with weights
     max_pnl = max((t.get("baseball_pnl_15d") or 0 for t in trader_list), default=1)
     trader_idx = {}
@@ -371,6 +374,7 @@ def compute_sentiment(trader_list):
         sharpe_w = min(sharpe / 2.0, 1.0)
         weight = 0.5 * pnl_w + 0.2 * wr_w + 0.15 * sharpe_w + 0.15 * human
         t["_weight"] = round(weight, 4)
+        t["_notionals"] = []
         trader_idx[t["wallet"]] = t
 
     # Load trades from cache
@@ -386,6 +390,7 @@ def compute_sentiment(trader_list):
             cid = d["condition_id"]
             slug = d.get("slug", "")
             parsed = parse_slug(slug)
+            notional = (d.get("size", 0) or 0) * (d.get("price", 0) or 0)
             trades_by_cid[cid].append({
                 "wallet": wallet,
                 "condition_id": cid,
@@ -395,96 +400,122 @@ def compute_sentiment(trader_list):
                 "size": d.get("size", 0) or 0,
                 "price": d.get("price", 0) or 0,
                 "timestamp": d.get("timestamp", ""),
-                "notional": (d.get("size", 0) or 0) * (d.get("price", 0) or 0),
+                "notional": notional,
                 **parsed,
             })
+            if wallet in trader_idx:
+                trader_idx[wallet]["_notionals"].append(notional)
             total_trades += 1
+
+    # Compute avg notional per trader
+    for t in trader_idx.values():
+        notionals = t["_notionals"]
+        t["_avg_notional"] = sum(notionals) / len(notionals) if notionals else 0
+        t["_last_notional"] = notionals[-1] if notionals else 0
+        t["_confidence_spike"] = t["_last_notional"] >= t["_avg_notional"] * 1.5 if t["_avg_notional"] > 0 else False
 
     print(f"\nLoaded {total_trades} trade events across {len(trades_by_cid)} markets from cache")
 
     # Compute per-market sentiment
     today = today_ny()
     sentiments = []
+    spike_count = 0
     for cid, trades in trades_by_cid.items():
-        if not trades:
-            continue
-        outcomes = defaultdict(lambda: {"weighted_volume": 0.0, "trader_count": 0, "trader_set": set(), "trades": []})
-        for tr in trades:
-            t = trader_idx.get(tr["wallet"])
-            if not t:
+            if not trades:
                 continue
-            weight = t["_weight"]
-            notional = tr["notional"]
-            signal = notional * weight
-            if tr["side"] == "SELL":
-                signal = -signal
-            o = outcomes[tr["outcome"]]
-            o["weighted_volume"] += signal
-            o["trader_count"] += 1
-            o["trader_set"].add(tr["wallet"])
-            o["trades"].append(tr)
+            outcomes = defaultdict(lambda: {"weighted_volume": 0.0, "trader_count": 0, "trader_set": set(), "trades": []})
+            market_has_spike = False
+            for tr in trades:
+                t = trader_idx.get(tr["wallet"])
+                if not t:
+                    continue
+                weight = t["_weight"]
+                notional = tr["notional"]
+                signal = notional * weight
 
-        if not outcomes:
-            continue
-        total_weighted = sum(o["weighted_volume"] for o in outcomes.values())
-        if total_weighted == 0:
-            continue
+                # Apply accuracy modifier
+                market_type = tr.get("market_type", "other")
+                accuracy_mod = get_trader_accuracy_modifier(tr["wallet"], market_type, trader_accuracy)
+                signal *= accuracy_mod
 
-        sorted_outcomes = sorted(outcomes.items(), key=lambda x: -abs(x[1]["weighted_volume"]))
-        top_outcome, top_data = sorted_outcomes[0]
-        top_fraction = top_data["weighted_volume"] / total_weighted if total_weighted else 0
-        if len(sorted_outcomes) >= 2:
-            second_fraction = abs(sorted_outcomes[1][1]["weighted_volume"]) / total_weighted
-            conviction = abs(top_fraction - second_fraction) / max(top_fraction, second_fraction) if max(top_fraction, second_fraction) > 0 else 0
-        else:
-            conviction = 1.0
+                # Apply confidence spike modifier
+                avg_notional = t["_avg_notional"]
+                spike = notional >= avg_notional * 1.5 if avg_notional > 0 else False
+                if spike:
+                    spike_count += 1
+                    market_has_spike = True
+                    signal *= 2.0
 
-        all_traders = set()
-        for o in outcomes.values():
-            all_traders.update(o["trader_set"])
+                if tr["side"] == "SELL":
+                    signal = -signal
+                o = outcomes[tr["outcome"]]
+                o["weighted_volume"] += signal
+                o["trader_count"] += 1
+                o["trader_set"].add(tr["wallet"])
+                o["trades"].append(tr)
 
-        timestamps = [tr.get("timestamp", "") for tr in trades if tr.get("timestamp")]
-        timestamps.sort()
-        first_date = timestamps[0][:10] if timestamps else ""
-        last_date = timestamps[-1][:10] if timestamps else ""
+            if not outcomes:
+                continue
+            total_weighted = sum(o["weighted_volume"] for o in outcomes.values())
+            if total_weighted == 0:
+                continue
 
-        # Extract game date from slug
-        slug = trades[0].get("slug", "")
-        event_slug = trades[0].get("event_slug", "")
-        market_type = trades[0].get("market_type", "other")
-        is_futures = event_slug == "futures-props"
-        game_date = ""
-        if not is_futures:
-            m2 = SLUG_RE.match(slug)
-            if m2:
-                game_date = m2.group("date")
+            sorted_outcomes = sorted(outcomes.items(), key=lambda x: -abs(x[1]["weighted_volume"]))
+            top_outcome, top_data = sorted_outcomes[0]
+            top_fraction = top_data["weighted_volume"] / total_weighted if total_weighted else 0
+            if len(sorted_outcomes) >= 2:
+                second_fraction = abs(sorted_outcomes[1][1]["weighted_volume"]) / total_weighted
+                conviction = abs(top_fraction - second_fraction) / max(top_fraction, second_fraction) if max(top_fraction, second_fraction) > 0 else 0
+            else:
+                conviction = 1.0
 
-        sentiments.append({
-            "condition_id": cid,
-            "slug": slug,
-            "market_type": market_type,
-            "event_slug": event_slug,
-            "game_date": game_date,
-            "is_active": is_futures or (game_date and game_date >= today),
-            "first_trade_date": first_date,
-            "last_trade_date": last_date,
-            "outcomes": {
-                oc: {
-                    "weighted_volume": round(od["weighted_volume"], 2),
-                    "trader_count": len(od["trader_set"]),
-                    "trade_count": len(od["trades"]),
-                }
-                for oc, od in sorted_outcomes
-            },
-            "top_outcome": top_outcome,
-            "top_weighted_fraction": round(abs(top_fraction), 4),
-            "conviction": round(abs(conviction), 4),
-            "total_weighted_volume": round(total_weighted, 2),
-            "unique_traders": len(all_traders),
-            "total_trade_events": len(trades),
-        })
+            all_traders = set()
+            for o in outcomes.values():
+                all_traders.update(o["trader_set"])
 
-    print(f"Computed sentiment for {len(sentiments)} markets")
+            timestamps = [tr.get("timestamp", "") for tr in trades if tr.get("timestamp")]
+            timestamps.sort()
+            first_date = timestamps[0][:10] if timestamps else ""
+            last_date = timestamps[-1][:10] if timestamps else ""
+
+            # Extract game date from slug
+            slug = trades[0].get("slug", "")
+            event_slug = trades[0].get("event_slug", "")
+            market_type = trades[0].get("market_type", "other")
+            is_futures = event_slug == "futures-props"
+            game_date = ""
+            if not is_futures:
+                m2 = SLUG_RE.match(slug)
+                if m2:
+                    game_date = m2.group("date")
+
+            sentiments.append({
+                "condition_id": cid,
+                "slug": slug,
+                "market_type": market_type,
+                "event_slug": event_slug,
+                "game_date": game_date,
+                "is_active": is_futures or (game_date and game_date >= today),
+                "first_trade_date": first_date,
+                "last_trade_date": last_date,
+                "outcomes": {
+                    oc: {
+                        "weighted_volume": round(od["weighted_volume"], 2),
+                        "trader_count": len(od["trader_set"]),
+                        "trade_count": len(od["trades"]),
+                    }
+                    for oc, od in sorted_outcomes
+                },
+                "top_outcome": top_outcome,
+                "top_weighted_fraction": round(abs(top_fraction), 4),
+                "conviction": round(abs(conviction), 4),
+                "total_weighted_volume": round(total_weighted, 2),
+                "unique_traders": len(all_traders),
+                "total_trade_events": len(trades),
+                "confidence_spike": market_has_spike,
+            })
+
+    print(f"Computed sentiment for {len(sentiments)} markets ({spike_count} confidence spikes detected)")
 
     # Separate active vs expired
     active = [s for s in sentiments if s["is_active"]]
@@ -596,6 +627,7 @@ def build_live_view(open_markets, sentiments_by_cid, today, orderbook_data=None)
                 "first_trade_date": sentiment["first_trade_date"],
                 "last_trade_date": sentiment["last_trade_date"],
                 "outcomes": sentiment["outcomes"],
+                "confidence_spike": sentiment.get("confidence_spike", False),
             })
         if sentiment and orderbook_data and cid in orderbook_data:
             entry["orderbook"] = orderbook_data[cid]

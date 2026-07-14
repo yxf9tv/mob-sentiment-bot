@@ -95,6 +95,7 @@ def process_live_data(active_games, polled_at):
                     "depth_imbalance": m.get("orderbook", {}).get("depth_imbalance", None),
                     "total_trade_events": m.get("total_trade_events", 0),
                     "game_date": m.get("game_date", ""),
+                    "confidence_spike": m.get("confidence_spike", False),
                 }
                 log_event(event)
                 new_events.append(event)

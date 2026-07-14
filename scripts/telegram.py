@@ -74,6 +74,7 @@ def format_alert(event):
     game_date = event.get("game_date", "")
     composite_score = event.get("composite_score", 0)
     confidence = event.get("confidence", "MEDIUM")
+    confidence_spike = event.get("confidence_spike", False)
 
     lines = [
         f"⚾ *{label}*",
@@ -82,7 +83,9 @@ def format_alert(event):
     if game_date:
         lines.append(f"`{game_date}`")
     lines.append("")
-    lines.append(f"Score:\t*{composite_score:.2f}* ({confidence})")
+
+    spike_tag = " 🔥 *SPIKE*" if confidence_spike else ""
+    lines.append(f"Score:\t*{composite_score:.2f}* ({confidence}){spike_tag}")
     lines.append(f"Volume:\t${volume:,.0f}")
     lines.append(f"Traders:\t{traders}")
 
