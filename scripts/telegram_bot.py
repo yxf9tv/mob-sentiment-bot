@@ -532,12 +532,12 @@ def _stop_text():
 #  Polling
 # ──────────────────────────────────────────────
 
-def poll_updates(offset=0):
+def poll_updates(offset=0, timeout=30):
     try:
         resp = requests.get(
             f"{API_BASE}/getUpdates",
-            params={"offset": offset, "timeout": 30},
-            timeout=35,
+            params={"offset": offset, "timeout": timeout},
+            timeout=timeout + 5,
         )
         return resp.json()
     except Exception as e:
@@ -547,7 +547,16 @@ def poll_updates(offset=0):
 
 def run_bot():
     print("Telegram bot started. Listening for commands...")
+
+    # Skip any backlog of updates that queued while the bot was down (e.g.
+    # during a deploy). getUpdates(offset=-1) returns only the most recent
+    # update; acking past it discards the backlog so old /start taps aren't
+    # replayed — otherwise the menu gets sent multiple times on startup.
     offset = 0
+    drain = poll_updates(-1, timeout=0)
+    if drain.get("ok") and drain.get("result"):
+        offset = drain["result"][-1]["update_id"] + 1
+        print(f"[telegram] skipped backlog; starting at offset {offset}")
 
     while not STOP_EVENT.is_set():
         data = poll_updates(offset)
